@@ -1,0 +1,271 @@
+# API Key System Implementation Guide
+# Cursorでの実装用ガイド
+
+project_structure:
+  src/:
+    - lib.rs
+    - main.rs
+    security/:
+      - mod.rs
+      - api_key.rs           # メインのAPIキーサービス
+      - validation.rs        # 検証ロジック
+      - crypto.rs           # 暗号化・ハッシュ化
+      - rate_limit.rs       # レート制限
+    models/:
+      - mod.rs
+      - api_key.rs          # データ構造定義
+      - device.rs           # デバイス情報
+      - audit.rs            # 監査ログ
+    database/:
+      - mod.rs
+      - surrealdb.rs        # SurrealDB接続・操作
+    errors/:
+      - mod.rs
+      - api_key_errors.rs   # エラー定義
+
+dependencies:
+  Cargo.toml: |
+    [dependencies]
+    rand = "0.8"
+    sha2 = "0.10"
+    base32 = "0.4"
+    chrono = { version = "0.4", features = ["serde"] }
+    serde = { version = "1.0", features = ["derive"] }
+    uuid = { version = "1.0", features = ["v4"] }
+    thiserror = "1.0"
+    tokio = { version = "1.0", features = ["full"] }
+    surrealdb = "1.5"
+    hex = "0.4"
+
+core_structures:
+  ApiKeyMetadata:
+    fields:
+      - prefix: String          # "myapp"
+      - environment: String     # "prod", "dev", "test"
+      - version: u8            # 1
+      - timestamp: u32         # Unix timestamp
+      - random_part: Vec<u8>   # 24 bytes (192 bit)
+
+  StoredApiKey:
+    fields:
+      - id: Uuid
+      - key_hash: String       # SHA256(actual_key)
+      - user_id: String
+      - scopes: Vec<String>    # ["ai:chat", "ai:completion"]
+      - device_binding: DeviceBinding
+      - rate_limit: RateLimit
+      - issued_at: DateTime<Utc>
+      - expires_at: DateTime<Utc>
+      - last_used_at: Option<DateTime<Utc>>
+      - usage_count: u64
+      - is_active: bool
+
+  DeviceBinding:
+    fields:
+      - fingerprint: String    # 必須のデバイスID
+      - user_agent: Option<String>
+      - ip_address: Option<String>
+      - app_signature: Option<String>
+
+  RateLimit:
+    fields:
+      - requests_per_minute: u32
+      - requests_per_hour: u32
+      - requests_per_day: u32
+      - tokens_per_day: u32
+
+key_generation:
+  format: "prefix_env_version_timestamp_random_checksum"
+  example: "myapp_prod_v1_1703123456_k8m2n9p3q7r1s5t4w6x9y2z5_a7b3c1d9"
+  entropy: "224 bits total (192 random + 32 timestamp)"
+  encoding: "Base32 (case-insensitive, no padding)"
+  
+  algorithm:
+    1. "Generate 24 random bytes (crypto-secure)"
+    2. "Create metadata struct"
+    3. "Calculate SHA256 checksum"
+    4. "Format as readable string"
+    5. "Return (key_string, metadata)"
+
+validation_flow:
+  steps:
+    1. "Parse key format (6 parts split by '_')"
+    2. "Verify checksum (recalculate and compare)"
+    3. "Hash key and lookup in database"
+    4. "Check is_active and expiration"
+    5. "Verify device binding"
+    6. "Check rate limits"
+    7. "Update usage statistics"
+    8. "Return stored key data"
+
+core_methods:
+  ApiKeyService:
+    new: "(service: &str, env: &str, db: SurrealDB) -> Self"
+    generate_api_key: "() -> (String, ApiKeyMetadata)"
+    issue_api_key: "(user_id, scopes, device, rate_limit) -> Result<IssuedApiKey>"
+    validate_api_key: "(key, device_fingerprint, ip) -> Result<StoredApiKey>"
+    revoke_api_key: "(key_id, user_id) -> Result<()>"
+    rotate_api_key: "(old_key_id, user_id) -> Result<IssuedApiKey>"
+    parse_api_key: "(key: &str) -> Result<ApiKeyMetadata>"
+
+database_schema:
+  surrealdb_tables:
+    api_keys:
+      fields:
+        - "id: uuid PRIMARY KEY"
+        - "key_hash: string UNIQUE"
+        - "user_id: string INDEX"
+        - "scopes: array<string>"
+        - "device_binding: object"
+        - "rate_limit: object"
+        - "issued_at: datetime"
+        - "expires_at: datetime INDEX"
+        - "last_used_at: datetime"
+        - "usage_count: int DEFAULT 0"
+        - "is_active: bool DEFAULT true INDEX"
+
+    api_usage:
+      fields:
+        - "id: uuid PRIMARY KEY"
+        - "key_id: uuid INDEX"
+        - "timestamp: datetime INDEX"
+        - "endpoint: string"
+        - "tokens_used: int"
+        - "device_fingerprint: string"
+        - "ip_address: string"
+        - "success: bool"
+
+    audit_logs:
+      fields:
+        - "id: uuid PRIMARY KEY"
+        - "user_id: string INDEX"
+        - "action: string"         # "issued", "revoked", "rotated"
+        - "key_id: uuid"
+        - "timestamp: datetime INDEX"
+        - "details: object"
+
+security_features:
+  entropy: "224-bit total entropy"
+  checksum: "SHA256-based tamper detection"
+  device_binding: "Required device fingerprint"
+  rate_limiting: "Multi-level (minute/hour/day)"
+  audit_logging: "Complete operation history"
+  immediate_revocation: "Instant access termination"
+  key_rotation: "Seamless key replacement"
+
+error_handling:
+  ApiKeyError:
+    variants:
+      - InvalidFormat
+      - InvalidChecksum
+      - InvalidVersion
+      - Expired
+      - NotFound
+      - InvalidEncoding
+      - RateLimitExceeded
+      - InsufficientPermissions
+      - DeviceMismatch
+      - DatabaseError
+
+implementation_steps:
+  phase_1_basic:
+    1. "Create error types (errors/api_key_errors.rs)"
+    2. "Define data models (models/api_key.rs)"
+    3. "Implement crypto functions (security/crypto.rs)"
+    4. "Create key generation (security/api_key.rs)"
+
+  phase_2_validation:
+    1. "Implement key parsing (security/validation.rs)"
+    2. "Add checksum verification"
+    3. "Create database operations (database/surrealdb.rs)"
+    4. "Add device binding checks"
+
+  phase_3_advanced:
+    1. "Implement rate limiting (security/rate_limit.rs)"
+    2. "Add usage tracking"
+    3. "Create audit logging (models/audit.rs)"
+    4. "Add revocation/rotation"
+
+  phase_4_integration:
+    1. "Create service layer (security/api_key.rs)"
+    2. "Add comprehensive tests"
+    3. "Performance optimization"
+    4. "Documentation"
+
+testing_strategy:
+  unit_tests:
+    - "Key generation randomness"
+    - "Checksum calculation/verification"
+    - "Format parsing edge cases"
+    - "Rate limit calculations"
+
+  integration_tests:
+    - "Database operations"
+    - "End-to-end key lifecycle"
+    - "Concurrent access handling"
+    - "Error scenarios"
+
+  security_tests:
+    - "Entropy analysis"
+    - "Timing attack resistance"
+    - "Invalid input handling"
+    - "Permission boundary tests"
+
+usage_example:
+  basic_flow: |
+    // 1. Initialize service
+    let api_service = ApiKeyService::new("myapp", "prod", db);
+    
+    // 2. Issue key
+    let device = DeviceBinding { 
+        fingerprint: "device_123", 
+        /* ... */ 
+    };
+    let key = api_service.issue_api_key(
+        "user_123", 
+        vec!["ai:chat"], 
+        device, 
+        default_rate_limit
+    ).await?;
+    
+    // 3. Validate on each request
+    let stored_key = api_service.validate_api_key(
+        &api_key, 
+        &device_fingerprint, 
+        Some(&ip_address)
+    ).await?;
+    
+    // 4. Use stored_key.scopes for authorization
+
+performance_considerations:
+  key_generation: "~1ms per key (crypto operations)"
+  validation: "~10ms per validation (DB lookup + checks)"
+  database_indexes: "key_hash, user_id, expires_at, is_active"
+  caching_strategy: "Redis cache for frequently used keys"
+  batch_operations: "Bulk validation for high throughput"
+
+deployment_notes:
+  environment_variables:
+    - "DATABASE_URL: SurrealDB connection"
+    - "API_KEY_SERVICE_PREFIX: Service identifier"
+    - "API_KEY_ENVIRONMENT: prod/dev/test"
+    - "RATE_LIMIT_DEFAULTS: JSON config"
+
+  monitoring:
+    - "Key issuance rate"
+    - "Validation success/failure rate"
+    - "Rate limit violations"
+    - "Audit log volume"
+
+  backup_strategy:
+    - "Regular SurrealDB snapshots"
+    - "Audit log archival"
+    - "Key usage analytics export"
+
+next_steps:
+  1. "Start with phase_1_basic implementation"
+  2. "Set up SurrealDB connection and schema"
+  3. "Implement core generation/validation logic"
+  4. "Add comprehensive test suite"
+  5. "Integrate with existing CQRS system"
+  6. "Deploy and monitor in development environment"
